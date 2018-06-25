@@ -10,6 +10,7 @@ import org.http4s.dsl.io._
 import org.http4s.client.blaze._
 import org.http4s.client.dsl.io._
 import org.http4s.Uri
+import org.http4s.circe._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 
@@ -22,41 +23,74 @@ case class UserIdentity(
   skipFirstUse: String = "",
   referrerId: String = "")
 
+case class SmsChallenge(
+  csrf: String,
+  challengeType: String = "challengeSMS",
+  challengeReason: String = "DEVICE_AUTH",
+  challengeMethod: String = "OP",
+  apiClient: String = "WEB",
+  bindDevice: String = "false")
+
+case class SmsAuth(
+  code: String,
+  csrf: String,
+  challengeReason: String = "DEVICE_AUTH",
+  challengeMethod: String = "OP",
+  apiClient: String = "WEB",
+  bindDevice: String = "false")
+
 object PCapClient {
 
   val BASE_URL = Uri.uri("https://home.personalcapital.com")
-  val LOGIN = BASE_URL / "page" / "login"
-  val CSRF_URL = LOGIN / "goHome"
-  val IDENTIFY_URL = LOGIN / "identifyUser"
+  val PAGE_URL = BASE_URL / "page"
+  val API_URL = BASE_URL / "api"
+
+  val CSRF_URL = PAGE_URL / "login" / "goHome"
+  val IDENTIFY_URL = API_URL / "login" / "identifyUser"
+  val SMS_CHALLENGE_URL = API_URL / "credential" / "challengeSms"
+  val SMS_AUTH_URL = API_URL / "credential" / "authenticateSms"
 
   val CSRF_SELECTOR = raw"globals.csrf='([a-f0-9-]+)".r
-
-  // def authorize[F[_]: Effect](
-  //   implicit ec: ExecutionContext,
-  //   email: String, password: String): F[String] = ???
-
-  val httpClient = Http1Client[IO]().unsafeRunSync
 
   def status(status: String): IO[String] = {
     val target = Uri.uri("https://httpstat.us/") / status
 
     Http1Client[IO]().flatMap(_.expect[String](target))
-    // httpClient.expect[String](target)
   }
 
-  def identify(user: UserIdentity): IO[String] = {
-    val body = user.asJson
-    Http1Client[IO]()
-      .flatMap(_.expect[String](
-        POST(IDENTIFY_URL, body)))
+  def initAuth(username: String): IO[(String,String)] = {
+    for {
+      csrfToken <- csrf()
+      // authLevel <- identify(UserIdentity(username, csrfToken))
+      res <- smsChallenge(SmsChallenge(csrfToken))
+    } yield (csrfToken, res)
   }
 
-  def csrf(): IO[String] = {
-    Http1Client[IO]()
-      .flatMap(_.expect[String](CSRF_URL))
-      .flatMap(CSRF_SELECTOR.findFirstMatchIn(_)
-        .map(found => IO.pure(found.group(1)))
-        .getOrElse(IO.raiseError(new Exception("No CSRF found"))))
-  }
+  def completeAuth(csrf: String, code: String): IO[String] =
+    for {
+      res <- smsAuth(SmsAuth(code, csrf))
+    } yield (res)
+
+  def smsChallenge(sms: SmsChallenge): IO[String] = Http1Client[IO]()
+    .flatMap(_.expect[String](
+      POST(SMS_CHALLENGE_URL, sms.asJson)))
+
+  def smsAuth(sms: SmsAuth): IO[String] = Http1Client[IO]()
+    .flatMap(_.expect[String](
+      POST(SMS_AUTH_URL, sms.asJson)))
+
+  def identify(user: UserIdentity): IO[String] = Http1Client[IO]()
+    .flatMap(_.expect[String](
+      POST(IDENTIFY_URL, user.asJson)))
+
+  def csrf(): IO[String] = Http1Client[IO]()
+    .flatMap(_.expect[String](CSRF_URL))
+    .flatMap(findCsrfToken(_)
+      .map(IO.pure(_))
+      .getOrElse(IO.raiseError(new Exception("No CSRF found"))))
+
+
+  def findCsrfToken(rawPage: String): Option[String] =
+    CSRF_SELECTOR.findFirstMatchIn(rawPage).map(_.group(1))
 }
 
